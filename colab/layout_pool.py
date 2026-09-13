@@ -19,6 +19,11 @@ def init_gpu(layout_py,config_json,model_dir,workers):
     MODEL=create_model(CFG['layout_model'],model_dir=model_dir,device='gpu:0')
     print(f'LAYOUT_ENGINE_READY pid={os.getpid()} device={paddle.device.get_device()} model={CFG["layout_model"]} model_dir={model_dir}',flush=True)
 
+def engine_probe(i):
+    import paddle,time
+    time.sleep(1.0)
+    return i,os.getpid(),paddle.device.get_device(),MODEL is not None
+
 def layout_one(item):
     row,ocr_local,img_local,outdir=item; t0=time.time(); p=Path(ocr_local); d=json.loads(p.read_text(encoding='utf-8'))
     d['source']=img_local; p.write_text(json.dumps(d,ensure_ascii=False),encoding='utf-8')
@@ -66,6 +71,10 @@ def main():
     print(f'LAYOUT_POOL_START workers={a.workers} downloaders={a.downloaders} watch=1 model_source=VPS_CACHE',flush=True)
     ctx=mp.get_context('spawn')
     pool=ProcessPoolExecutor(max_workers=a.workers,mp_context=ctx,initializer=init_gpu,initargs=(str(runtime/'layout_map.py'),str(runtime/'config.json'),model_dir,a.workers))
+    print('LAYOUT_PREFLIGHT starting GPU workers before claim download...',flush=True)
+    probes=[pool.submit(engine_probe,i) for i in range(a.workers)]
+    probe_rows=[f.result(timeout=240) for f in probes]
+    print('LAYOUT_PREFLIGHT_OK '+json.dumps(probe_rows),flush=True)
     last_stage=None; upload_tr=upload_sftp=None
     def upload_pair(jp,tp,r):
         nonlocal upload_tr,upload_sftp
