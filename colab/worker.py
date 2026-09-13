@@ -54,14 +54,35 @@ def parse_alto_rows(payload):
     rows.sort(key=lambda z:(z['y1'],z['x1']))
     return rows
 
-def build_engine(profile):
+def ort_device(device):
+    import onnxruntime as ort
+    providers=ort.get_available_providers()
+    cuda='CUDAExecutionProvider' in providers
+    if device=='cuda' and not cuda:
+        raise RuntimeError(f'CUDAExecutionProvider unavailable: {providers}')
+    use_cuda=cuda if device=='auto' else device=='cuda'
+    selected='CUDA' if use_cuda else 'CPU'
+    print(f'ORT providers={providers} selected={selected}',flush=True)
+    return use_cuda,providers
+
+def build_engine(profile,device):
     from rapidocr import RapidOCR, LangRec, ModelType, OCRVersion
-    params={'Global.log_level':'error','EngineConfig.onnxruntime.intra_op_num_threads':1,'EngineConfig.onnxruntime.inter_op_num_threads':1,
+    use_cuda,_=ort_device(device)
+    params={
+      'Global.log_level':'error',
+      'EngineConfig.onnxruntime.intra_op_num_threads':1,
+      'EngineConfig.onnxruntime.inter_op_num_threads':1,
+      'EngineConfig.onnxruntime.use_cuda':use_cuda,
+      'EngineConfig.onnxruntime.cuda_ep_cfg.device_id':0,
+      'EngineConfig.onnxruntime.cuda_ep_cfg.cudnn_conv_algo_search':'EXHAUSTIVE',
+      'EngineConfig.onnxruntime.cuda_ep_cfg.do_copy_in_default_stream':True,
       'Rec.lang_type':LangRec.LATIN,'Rec.model_type':ModelType.MOBILE,'Rec.ocr_version':OCRVersion.PPOCRV5,
       'Det.model_type':ModelType.SMALL,'Det.ocr_version':OCRVersion.PPOCRV6}
     if profile=='HQ': params.update({'Det.limit_side_len':2048,'Det.limit_type':'min','Det.box_thresh':0.30,'Det.max_candidates':4000})
     else: params.update({'Det.limit_side_len':1536,'Det.limit_type':'min','Det.box_thresh':0.35,'Det.max_candidates':3000})
-    return RapidOCR(params=params)
+    engine=RapidOCR(params=params)
+    print(f'RapidOCR engine ready profile={profile} device={"CUDA" if use_cuda else "CPU"}',flush=True)
+    return engine
 
 def ocr_image(path,engine):
     res=engine(str(path)); rows=[]
@@ -72,12 +93,12 @@ def ocr_image(path,engine):
     rows.sort(key=lambda z:(z['y1'],z['x1']))
     return rows
 
-def write_payload(outdir,ark,page,rows,profile,source):
+def write_payload(outdir,ark,page,rows,profile,source,device):
     stem=f'{ark}_f{page}';outdir=Path(outdir);outdir.mkdir(parents=True,exist_ok=True)
     texts=[r['text'] for r in rows];hits=[i for i,t in enumerate(texts) if hit(t)];ctx=[]
     for i in hits:
         a=max(0,i-5);b=min(len(texts),i+13);ctx.append(f'--- {a+1}-{b} ---');ctx.extend(texts[a:b])
-    payload={'source':source,'ocr_profile':profile,'ocr_generation':'colab_batch_v2','colab':True,'rows':rows,'hit_indices':hits}
+    payload={'source':source,'ocr_profile':profile,'ocr_generation':'colab_batch_v3_gpu','colab':True,'compute_device':device,'rows':rows,'hit_indices':hits}
     paths=[outdir/f'{stem}.json',outdir/f'{stem}.txt',outdir/f'{stem}.hits.txt']
     paths[0].write_text(json.dumps(payload,ensure_ascii=False),encoding='utf-8');paths[1].write_text('\n'.join(texts)+'\n',encoding='utf-8')
     paths[2].write_text('\n'.join(ctx)+'\n' if ctx else '',encoding='utf-8');return paths
@@ -110,9 +131,12 @@ def main():
     ap=argparse.ArgumentParser();ap.add_argument('--manifest',required=True);ap.add_argument('--workdir',default='/content/tml_colab')
     ap.add_argument('--vps-host',required=True);ap.add_argument('--vps-user',required=True);ap.add_argument('--vps-key-b64',required=True);ap.add_argument('--vps-port',type=int,default=22)
     ap.add_argument('--remote-cache',required=True);ap.add_argument('--remote-alto-cache',default='');ap.add_argument('--profile',default='HQ',choices=['HQ','STANDARD'])
-    ap.add_argument('--delay',type=float,default=15.0);ap.add_argument('--max-pages',type=int,default=0)
+    ap.add_argument('--device',default='auto',choices=['auto','cuda','cpu']);ap.add_argument('--delay',type=float,default=15.0);ap.add_argument('--max-pages',type=int,default=0)
     a=ap.parse_args();wd=Path(a.workdir);wd.mkdir(parents=True,exist_ok=True);rows=read_manifest(a.manifest)
     if a.max_pages:rows=rows[:a.max_pages]
+    if any((r.get('mode') or r.get('split') or '').upper()=='RAPID' for r in rows):
+        use_cuda,_=ort_device(a.device); compute='CUDA' if use_cuda else 'CPU'
+    else: compute='NETWORK'
     tr,sftp=connect_sftp(a.vps_host,a.vps_user,a.vps_key_b64,a.vps_port);sftp_mkdirs(sftp,a.remote_cache)
     engine=None;done=alto_n=ocr_n=err=0;session=requests.Session();session.headers.update({'User-Agent':'Mozilla/5.0','Accept':'application/xml,text/xml,*/*'})
     for i,r in enumerate(rows,1):
@@ -122,24 +146,22 @@ def main():
         try:sftp.stat(remote_json);print(f'CACHED {i}/{len(rows)} {stem}',flush=True);continue
         except IOError:pass
         try:
-            xml_payload=None
+            xml_payload=None;t0=time.time()
             if mode=='ALTO':
                 rr=session.get(f'https://gallica.bnf.fr/RequestDigitalElement?O={ark}&E=ALTO&Deb={page}',timeout=45)
-                if rr.status_code!=200 or not alto_text(rr.content):
-                    raise RuntimeError(f'ALTO_UNAVAILABLE status={rr.status_code}')
-                rows_out=parse_alto_rows(rr.content);xml_payload=rr.content;alto_n+=1;time.sleep(a.delay)
+                if rr.status_code!=200 or not alto_text(rr.content): raise RuntimeError(f'ALTO_UNAVAILABLE status={rr.status_code}')
+                rows_out=parse_alto_rows(rr.content);xml_payload=rr.content;alto_n+=1;time.sleep(a.delay);dev='NETWORK'
             elif mode=='RAPID':
                 img=session.get(f'https://gallica.bnf.fr/ark:/12148/{ark}/f{page}.highres',timeout=60);img.raise_for_status();ip=wd/f'{stem}.jpg';ip.write_bytes(img.content)
-                if engine is None:engine=build_engine(a.profile)
-                rows_out=ocr_image(ip,engine);ocr_n+=1;ip.unlink(missing_ok=True)
-            else:
-                raise RuntimeError(f'UNKNOWN_SPLIT_MODE {mode!r}')
+                if engine is None:engine=build_engine(a.profile,a.device)
+                rows_out=ocr_image(ip,engine);ocr_n+=1;ip.unlink(missing_ok=True);dev=compute
+            else: raise RuntimeError(f'UNKNOWN_SPLIT_MODE {mode!r}')
             source=(r.get('source_image') or '').strip() or 'COLAB'
-            files=write_payload(wd/'out',ark,page,rows_out,'ALTO_NATIVE' if mode=='ALTO' else a.profile,source)
+            files=write_payload(wd/'out',ark,page,rows_out,'ALTO_NATIVE' if mode=='ALTO' else a.profile,source,dev)
             for fp in files:sftp.put(str(fp),f"{a.remote_cache.rstrip('/')}/{stem}{suffix(fp)}")
             if xml_payload and a.remote_alto_cache:
                 ad=f"{a.remote_alto_cache.rstrip('/')}/{ark}";sftp_mkdirs(sftp,ad);xp=wd/f'{stem}.xml';xp.write_bytes(xml_payload);sftp.put(str(xp),f'{ad}/f{int(page):03d}.xml');xp.unlink(missing_ok=True)
-            done+=1;print(f'DONE {i}/{len(rows)} {stem} mode={mode}',flush=True)
+            done+=1;print(f'DONE {i}/{len(rows)} {stem} mode={mode} device={dev} sec={time.time()-t0:.1f}',flush=True)
         except Exception as e:err+=1;print(f'ERR {i}/{len(rows)} {stem} mode={mode} {type(e).__name__}: {e}',flush=True)
-    sftp.close();tr.close();print(json.dumps({'total':len(rows),'done':done,'alto':alto_n,'rapidocr':ocr_n,'errors':err}),flush=True)
+    sftp.close();tr.close();print(json.dumps({'total':len(rows),'done':done,'alto':alto_n,'rapidocr':ocr_n,'errors':err,'rapid_device':compute}),flush=True)
 if __name__=='__main__':main()
