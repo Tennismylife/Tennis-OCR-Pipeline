@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, csv, json, os, re, time, base64, tempfile
+import argparse, csv, json, os, re, time, base64
 from pathlib import Path
 from difflib import SequenceMatcher
 import requests
@@ -92,8 +92,7 @@ def write_payload(outdir,ark,page,rows,profile,source,extra=None):
     return [outdir/f'{stem}.json',outdir/f'{stem}.txt',outdir/f'{stem}.hits.txt']
 
 def connect_sftp(host,user,key_b64,port=22):
-    keydata=base64.b64decode(key_b64).decode()
-    key=None
+    keydata=base64.b64decode(key_b64).decode(); key=None
     for cls in (paramiko.Ed25519Key,paramiko.RSAKey,paramiko.ECDSAKey):
         try:
             from io import StringIO
@@ -110,6 +109,13 @@ def sftp_mkdirs(sftp,path):
         cur=(cur.rstrip('/')+'/'+p) if cur else p
         try:sftp.stat(cur)
         except IOError:sftp.mkdir(cur)
+
+def stage_suffix(fp):
+    n=fp.name
+    if n.endswith('.hits.txt'): return '.hits.txt'
+    if n.endswith('.json'): return '.json'
+    if n.endswith('.txt'): return '.txt'
+    raise ValueError(f'Unexpected output file: {n}')
 
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--manifest',required=True);ap.add_argument('--workdir',default='/content/tml_colab')
@@ -144,8 +150,7 @@ def main():
             local=wd/'out';files=write_payload(local,ark,page,rows_out,'ALTO_NATIVE' if xml_payload else a.profile,'COLAB',{'colab':True})
             sftp_mkdirs(sftp,remote_dir)
             for fp in files:
-                ext=fp.suffix
-                dest=f"{remote_dir}/f{int(page):03d}.colab{ext}";sftp.put(str(fp),dest)
+                dest=f"{remote_dir}/f{int(page):03d}.colab{stage_suffix(fp)}";sftp.put(str(fp),dest)
             if xml_payload:
                 xp=wd/f'{ark}_f{page}.xml';xp.write_bytes(xml_payload);sftp.put(str(xp),f"{remote_dir}/f{int(page):03d}.xml");xp.unlink(missing_ok=True)
             done+=1; print(f'DONE {i}/{len(rows)} {ark} f{page} mode={"ALTO" if xml_payload else a.profile}',flush=True)
