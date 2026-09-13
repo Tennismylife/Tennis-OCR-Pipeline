@@ -131,7 +131,8 @@ def main():
                 img=session.get(f'https://gallica.bnf.fr/ark:/12148/{ark}/f{page}.highres',timeout=60);img.raise_for_status();ip=wd/f'{stem}.jpg';ip.write_bytes(img.content)
                 if engine is None:engine=build_engine(a.profile)
                 rows_out=ocr_image(ip,engine);ocr_n+=1;ip.unlink(missing_ok=True)
-            files=write_payload(wd/'out',ark,page,rows_out,'ALTO_NATIVE' if xml_payload else a.profile,'COLAB')
+            source=(r.get('source_image') or '').strip() or 'COLAB'
+            files=write_payload(wd/'out',ark,page,rows_out,'ALTO_NATIVE' if xml_payload else a.profile,source)
             for fp in files:sftp.put(str(fp),f"{a.remote_cache.rstrip('/')}/{stem}{suffix(fp)}")
             if xml_payload and a.remote_alto_cache:
                 ad=f"{a.remote_alto_cache.rstrip('/')}/{ark}";sftp_mkdirs(sftp,ad);xp=wd/f'{stem}.xml';xp.write_bytes(xml_payload);sftp.put(str(xp),f'{ad}/f{int(page):03d}.xml');xp.unlink(missing_ok=True)
