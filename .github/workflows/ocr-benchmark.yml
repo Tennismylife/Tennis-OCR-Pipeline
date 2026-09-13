@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ocr-benchmark
+  cancel-in-progress: true
+
 jobs:
   benchmark:
     name: shard-${{ matrix.shard }}
