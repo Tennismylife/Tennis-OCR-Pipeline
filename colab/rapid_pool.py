@@ -22,6 +22,16 @@ def ocr_one(item):
     jp.write_text(json.dumps(d,ensure_ascii=False),encoding='utf-8')
     return stem,[str(x) for x in files],time.time()-t0,len(rows)
 
+def gpu_snapshot():
+    try:
+        out=subprocess.check_output([
+            'nvidia-smi','--query-gpu=utilization.gpu,memory.used,power.draw',
+            '--format=csv,noheader,nounits'
+        ],text=True,timeout=3).strip().split(',')
+        return float(out[0]),float(out[1]),float(out[2])
+    except Exception:
+        return 0.0,0.0,0.0
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--manifest',required=True); ap.add_argument('--vps-host',required=True); ap.add_argument('--vps-user',required=True)
@@ -77,7 +87,7 @@ def main():
         return ('ready',r,str(dst))
 
     workers=max(1,min(a.workers,len(rows))); ctx=mp.get_context('spawn')
-    done=err=fetched=cached=0; t0=time.time(); upload_tr=upload_sftp=None
+    done=err=fetched=cached=0; t0=time.time(); upload_tr=upload_sftp=None; last_status=0
     def upload(stem,files):
         nonlocal upload_tr,upload_sftp
         for attempt in (1,2):
@@ -96,6 +106,11 @@ def main():
     with ThreadPoolExecutor(max_workers=max(1,a.downloaders)) as dl, ProcessPoolExecutor(max_workers=workers,mp_context=ctx,initializer=init_engine,initargs=(a.profile,)) as gpu:
         fetch_pending={dl.submit(fetch,r) for r in rows}; gpu_pending=set()
         while fetch_pending or gpu_pending:
+            now=time.time()
+            if now-last_status>=5:
+                u,m,p=gpu_snapshot()
+                print(f'RAPID_STATUS elapsed={now-t0:.1f}s done={done} cached={cached} fetched={fetched} inflight={len(gpu_pending)} fetch_pending={len(fetch_pending)} gpu={u:.0f}% vram={m:.0f}MiB power={p:.0f}W',flush=True)
+                last_status=now
             ready_gpu={f for f in gpu_pending if f.done()}
             for f in ready_gpu:
                 gpu_pending.remove(f)
@@ -126,6 +141,8 @@ def main():
         if upload_tr: upload_tr.close()
     except Exception: pass
     elapsed=max(.001,time.time()-t0)
+    u,m,p=gpu_snapshot()
+    print(f'RAPID_FINAL done={done} cached={cached} errors={err} elapsed={elapsed:.1f}s ppm={done*60/elapsed:.2f} gpu={u:.0f}% vram={m:.0f}MiB power={p:.0f}W',flush=True)
     print({'rows':len(rows),'cached':cached,'fetched':fetched,'done':done,'errors':err,'workers':workers,'elapsed_sec':round(elapsed,1),'pages_per_min':round(done*60/elapsed,2)},flush=True)
 
 if __name__=='__main__': main()
