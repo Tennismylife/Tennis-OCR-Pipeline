@@ -55,14 +55,27 @@ def parse_alto_rows(payload):
     return rows
 
 def ort_device(device):
+    # Colab ships PyTorch + CUDA libraries. Import torch first so its matching CUDA/cuDNN
+    # libraries are loaded before ONNX Runtime creates CUDA sessions.
+    torch_cuda='unknown'
+    try:
+        import torch
+        torch_cuda=str(torch.version.cuda)
+    except Exception as e:
+        print(f'Torch preload warning: {type(e).__name__}: {e}',flush=True)
     import onnxruntime as ort
+    try:
+        if hasattr(ort,'preload_dlls'):
+            ort.preload_dlls()
+    except Exception as e:
+        print(f'ORT preload warning: {type(e).__name__}: {e}',flush=True)
     providers=ort.get_available_providers()
     cuda='CUDAExecutionProvider' in providers
     if device=='cuda' and not cuda:
-        raise RuntimeError(f'CUDAExecutionProvider unavailable: {providers}')
+        raise RuntimeError(f'CUDAExecutionProvider unavailable: ORT={ort.__version__} torch_cuda={torch_cuda} providers={providers}')
     use_cuda=cuda if device=='auto' else device=='cuda'
     selected='CUDA' if use_cuda else 'CPU'
-    print(f'ORT providers={providers} selected={selected}',flush=True)
+    print(f'ORT version={ort.__version__} torch_cuda={torch_cuda} providers={providers} selected={selected}',flush=True)
     return use_cuda,providers
 
 def build_engine(profile,device):
@@ -74,7 +87,7 @@ def build_engine(profile,device):
       'EngineConfig.onnxruntime.inter_op_num_threads':1,
       'EngineConfig.onnxruntime.use_cuda':use_cuda,
       'EngineConfig.onnxruntime.cuda_ep_cfg.device_id':0,
-      'EngineConfig.onnxruntime.cuda_ep_cfg.cudnn_conv_algo_search':'EXHAUSTIVE',
+      'EngineConfig.onnxruntime.cuda_ep_cfg.cudnn_conv_algo_search':'HEURISTIC',
       'EngineConfig.onnxruntime.cuda_ep_cfg.do_copy_in_default_stream':True,
       'Rec.lang_type':LangRec.LATIN,'Rec.model_type':ModelType.MOBILE,'Rec.ocr_version':OCRVersion.PPOCRV5,
       'Det.model_type':ModelType.SMALL,'Det.ocr_version':OCRVersion.PPOCRV6}
