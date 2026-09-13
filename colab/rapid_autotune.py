@@ -14,16 +14,19 @@ def init_engine(profile, ready_dir):
 def bench_one(path):
     t0=time.time(); rows=ocr_image(path,ENGINE); return time.time()-t0, len(rows)
 
+def gpu_snapshot():
+    try:
+        out=subprocess.check_output([
+            'nvidia-smi','--query-gpu=utilization.gpu,memory.used,power.draw',
+            '--format=csv,noheader,nounits'
+        ], text=True, timeout=3).strip().split(',')
+        return float(out[0]),float(out[1]),float(out[2])
+    except Exception:
+        return 0.0,0.0,0.0
+
 def sample_gpu(stop, bucket):
     while not stop.is_set():
-        try:
-            out=subprocess.check_output([
-                'nvidia-smi','--query-gpu=utilization.gpu,memory.used,power.draw',
-                '--format=csv,noheader,nounits'
-            ], text=True, timeout=3).strip().split(',')
-            bucket.append((float(out[0]),float(out[1]),float(out[2])))
-        except Exception:
-            pass
+        bucket.append(gpu_snapshot())
         stop.wait(0.5)
 
 def main():
@@ -52,7 +55,10 @@ def main():
             get_sftp().get((r.get('source_image') or '').strip(),str(dst))
         return str(dst)
     with ThreadPoolExecutor(max_workers=max(1,a.downloaders)) as ex:
-        paths=list(ex.map(fetch,sample))
+        paths=[]
+        for i,p in enumerate(ex.map(fetch,sample),1):
+            paths.append(p)
+            if i==1 or i%8==0 or i==len(sample): print(f'AUTOTUNE_FETCH {i}/{len(sample)}',flush=True)
     print(f'AUTOTUNE_IMAGES_READY n={len(paths)}',flush=True)
 
     raw=[int(x) for x in a.candidates.split(',') if x.strip()]
@@ -67,20 +73,33 @@ def main():
         ready.mkdir(exist_ok=True)
         print(f'AUTOTUNE_CASE workers={workers} initializing...',flush=True)
         with ProcessPoolExecutor(max_workers=workers,mp_context=ctx,initializer=init_engine,initargs=(a.profile,str(ready))) as pool:
-            # Force pool startup. Initializers create ready files.
             warm=[pool.submit(time.sleep,0.8) for _ in range(workers*2)]
-            deadline=time.time()+180
+            deadline=time.time()+180; last_init=0
             while time.time()<deadline and len(list(ready.glob('ready_*')))<workers:
+                now=time.time()
+                if now-last_init>=5:
+                    rn=len(list(ready.glob('ready_*'))); u,m,p=gpu_snapshot()
+                    print(f'AUTOTUNE_INIT workers={workers} ready={rn}/{workers} gpu={u:.0f}% vram={m:.0f}MiB power={p:.0f}W',flush=True)
+                    last_init=now
                 time.sleep(0.25)
             for f in warm: f.result()
             ready_n=len(list(ready.glob('ready_*')))
             print(f'AUTOTUNE_CASE workers={workers} ready={ready_n}',flush=True)
             gpu=[]; stop=threading.Event(); mon=threading.Thread(target=sample_gpu,args=(stop,gpu),daemon=True); mon.start()
-            t0=time.time(); fut=[pool.submit(bench_one,p) for p in paths]
+            t0=time.time(); progress={'done':0}; hb_stop=threading.Event()
+            def heartbeat():
+                while not hb_stop.wait(5):
+                    u,m,p=gpu_snapshot()
+                    print(f'AUTOTUNE_PROGRESS workers={workers} done={progress["done"]}/{len(paths)} elapsed={time.time()-t0:.1f}s gpu={u:.0f}% vram={m:.0f}MiB power={p:.0f}W',flush=True)
+            hb=threading.Thread(target=heartbeat,daemon=True); hb.start()
+            fut=[pool.submit(bench_one,p) for p in paths]
             page_times=[]; rows_total=0
             for f in as_completed(fut):
-                sec,nrows=f.result(); page_times.append(sec); rows_total+=nrows
-            elapsed=time.time()-t0; stop.set(); mon.join(timeout=2)
+                sec,nrows=f.result(); page_times.append(sec); rows_total+=nrows; progress['done']+=1
+                if progress['done']==1 or progress['done']%8==0 or progress['done']==len(paths):
+                    u,m,p=gpu_snapshot()
+                    print(f'AUTOTUNE_PROGRESS workers={workers} done={progress["done"]}/{len(paths)} elapsed={time.time()-t0:.1f}s gpu={u:.0f}% vram={m:.0f}MiB power={p:.0f}W',flush=True)
+            elapsed=time.time()-t0; hb_stop.set(); hb.join(timeout=1); stop.set(); mon.join(timeout=2)
         ppm=len(paths)*60/max(elapsed,0.001)
         util=sum(x[0] for x in gpu)/len(gpu) if gpu else 0
         mem=max((x[1] for x in gpu),default=0)
