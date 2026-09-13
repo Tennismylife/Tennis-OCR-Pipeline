@@ -8,14 +8,16 @@ def main():
     ap.add_argument('--manifest',required=True);ap.add_argument('--vps-host',required=True);ap.add_argument('--vps-user',required=True)
     ap.add_argument('--vps-key-b64',required=True);ap.add_argument('--vps-port',type=int,default=2222);ap.add_argument('--remote-cache',required=True)
     ap.add_argument('--remote-alto-cache',default='');ap.add_argument('--delay',type=float,default=16.0);ap.add_argument('--workdir',default='/content/tml_alto')
-    a=ap.parse_args();rows=read_manifest(a.manifest);wd=Path(a.workdir);wd.mkdir(parents=True,exist_ok=True)
+    a=ap.parse_args();rows=[r for r in read_manifest(a.manifest) if (r.get('mode') or r.get('split') or '').upper()=='ALTO'];wd=Path(a.workdir);wd.mkdir(parents=True,exist_ok=True)
+    print(f'ALTO_SAFE_START rows={len(rows)} interval={a.delay:.1f}s max_requests_per_min={60.0/a.delay:.2f}',flush=True)
     tr,sftp=connect_sftp(a.vps_host,a.vps_user,a.vps_key_b64,a.vps_port);sftp_mkdirs(sftp,a.remote_cache)
     ses=requests.Session();ses.headers.update({'User-Agent':'Mozilla/5.0','Accept':'application/xml,text/xml,*/*'})
-    next_request=0.0;done=err=0
+    next_request=0.0;done=err=cached=0
     for i,r in enumerate(rows,1):
         ark=(r.get('ark') or '').strip();page=pg(r.get('page'));stem=f'{ark}_f{page}'
         if not ark or not page:continue
-        try:sftp.stat(f"{a.remote_cache.rstrip('/')}/{stem}.json");print(f'CACHED {i}/{len(rows)} {stem}',flush=True);continue
+        try:
+            sftp.stat(f"{a.remote_cache.rstrip('/')}/{stem}.json");cached+=1;print(f'CACHED {i}/{len(rows)} {stem}',flush=True);continue
         except IOError:pass
         wait=max(0.0,next_request-time.monotonic())
         if wait:time.sleep(wait)
@@ -33,5 +35,5 @@ def main():
                 sftp.put(str(xp),f'{ad}/f{int(page):03d}.xml');xp.unlink(missing_ok=True)
             done+=1;print(f'DONE {i}/{len(rows)} {stem} ALTO cadence={a.delay:.1f}s',flush=True)
         except Exception as e:err+=1;print(f'ERR {i}/{len(rows)} {stem} {e}',flush=True)
-    sftp.close();tr.close();print({'total':len(rows),'done':done,'errors':err,'min_request_interval_sec':a.delay},flush=True)
+    sftp.close();tr.close();print({'total':len(rows),'cached':cached,'done':done,'errors':err,'min_request_interval_sec':a.delay},flush=True)
 if __name__=='__main__':main()
