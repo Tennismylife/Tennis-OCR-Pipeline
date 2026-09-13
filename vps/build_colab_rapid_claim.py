@@ -18,6 +18,7 @@ def main():
             elif name=='image-dir': img=base/obj
             elif name=='remote-cache': cache=base/obj
             else: claim=base/obj
+    cache.mkdir(parents=True,exist_ok=True)
     with q.open(encoding='utf-8-sig',newline='') as f: rows=list(csv.DictReader(f,delimiter=delim(q)))
     out=[]; missing_images=[]; seen=set(); completed=0
     for r in rows:
@@ -30,17 +31,17 @@ def main():
             p=img/f'{stem}{ext}'
             if p.exists(): src=p; break
         if src is None: missing_images.append(stem); continue
-        x=dict(r); x.update(ark=ark,page=page,split_branch='RAPID',split_profile=a.profile,mode='RAPID',source_image=str(src)); out.append(x)
+        x=dict(r); x.update(ark=ark,page=page,split_branch='RAPID',split_profile=a.profile,mode='RAPID',source_image=str(src),remote_cache=str(cache)); out.append(x)
     if missing_images:
         print(json.dumps({'error':'missing_images','count':len(missing_images),'examples':missing_images[:20]})); return 2
     fields=[]
     for r in out:
         for k in r:
             if k not in fields: fields.append(k)
-    for k in ('ark','page','split_branch','split_profile','mode','source_image'):
+    for k in ('ark','page','split_branch','split_profile','mode','source_image','remote_cache'):
         if k not in fields: fields.append(k)
     claim.parent.mkdir(parents=True,exist_ok=True); tmp=claim.with_suffix(claim.suffix+'.tmp')
     with tmp.open('w',encoding='utf-8-sig',newline='') as f:
         w=csv.DictWriter(f,fieldnames=fields,delimiter='\t',extrasaction='ignore'); w.writeheader(); w.writerows(out)
-    tmp.replace(claim); print(json.dumps({'input_unique':len(seen),'already_complete':completed,'claim':len(out),'path':str(claim),'profile':a.profile})); return 0
+    tmp.replace(claim); print(json.dumps({'input_unique':len(seen),'already_complete':completed,'claim':len(out),'path':str(claim),'profile':a.profile,'remote_cache':str(cache)})); return 0
 if __name__=='__main__': raise SystemExit(main())
