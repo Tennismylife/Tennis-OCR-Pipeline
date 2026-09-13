@@ -5,11 +5,11 @@ from concurrent.futures import ThreadPoolExecutor,ProcessPoolExecutor,wait,FIRST
 from worker import read_manifest,pg,connect_sftp,build_engine,ocr_image,write_payload,suffix
 
 os.environ.setdefault('CUDA_MODULE_LOADING','LAZY')
-ENGINE=None; PROFILE='HQ'
+ENGINE=None; PROFILE='HQ'; GENERATION='colab_batch_v6_a100_w12'
 
-def init_engine(profile):
-    global ENGINE,PROFILE
-    PROFILE=profile
+def init_engine(profile,generation):
+    global ENGINE,PROFILE,GENERATION
+    PROFILE=profile; GENERATION=generation
     ENGINE=build_engine(profile,'cuda')
 
 def ocr_one(item):
@@ -18,16 +18,13 @@ def ocr_one(item):
     rows=ocr_image(ip,ENGINE)
     files=write_payload(outdir,ark,page,rows,PROFILE,(r.get('source_image') or 'COLAB'),'CUDA')
     jp=Path(files[0]); d=json.loads(jp.read_text(encoding='utf-8'))
-    d['ocr_generation']='colab_batch_v5_autotuned'; d['gpu_pool']=True
+    d['ocr_generation']=GENERATION; d['gpu_pool']=True
     jp.write_text(json.dumps(d,ensure_ascii=False),encoding='utf-8')
     return stem,[str(x) for x in files],time.time()-t0,len(rows)
 
 def gpu_snapshot():
     try:
-        out=subprocess.check_output([
-            'nvidia-smi','--query-gpu=utilization.gpu,memory.used,power.draw',
-            '--format=csv,noheader,nounits'
-        ],text=True,timeout=3).strip().split(',')
+        out=subprocess.check_output(['nvidia-smi','--query-gpu=utilization.gpu,memory.used,power.draw','--format=csv,noheader,nounits'],text=True,timeout=3).strip().split(',')
         return float(out[0]),float(out[1]),float(out[2])
     except Exception:
         return 0.0,0.0,0.0
@@ -36,8 +33,9 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--manifest',required=True); ap.add_argument('--vps-host',required=True); ap.add_argument('--vps-user',required=True)
     ap.add_argument('--vps-key-b64',required=True); ap.add_argument('--vps-port',type=int,default=2222); ap.add_argument('--remote-cache',required=True)
-    ap.add_argument('--profile',default='HQ'); ap.add_argument('--workers',type=int,default=16); ap.add_argument('--downloaders',type=int,default=6)
-    ap.add_argument('--workdir',default='/content/tml_rapid_pool'); ap.add_argument('--no-autotune',action='store_true'); a=ap.parse_args()
+    ap.add_argument('--profile',default='HQ'); ap.add_argument('--workers',type=int,default=12); ap.add_argument('--downloaders',type=int,default=8)
+    ap.add_argument('--workdir',default='/content/tml_rapid_pool'); ap.add_argument('--autotune',action='store_true'); ap.add_argument('--no-autotune',action='store_true')
+    a=ap.parse_args()
     rows=[r for r in read_manifest(a.manifest) if (r.get('mode') or r.get('split') or '').upper()=='RAPID']
     wd=Path(a.workdir); imgdir=wd/'images'; outdir=wd/'out'; imgdir.mkdir(parents=True,exist_ok=True); outdir.mkdir(parents=True,exist_ok=True)
     if not rows:
@@ -45,29 +43,24 @@ def main():
 
     selected=a.workers
     tune_file=wd/'autotune_result.json'
-    if not a.no_autotune:
-        if tune_file.exists():
-            try:
-                result=json.loads(tune_file.read_text()); selected=int(result['best_workers'])
-                print(f'RAPID_POOL_AUTOTUNE_REUSE workers={selected} ppm={result.get("best_pages_per_min")}',flush=True)
-            except Exception:
-                tune_file.unlink(missing_ok=True)
-        if not tune_file.exists():
-            print('RAPID_POOL_AUTOTUNE_START candidates=4,8,12,16 sample=32 source=VPS gallica_requests=0',flush=True)
-            tune=[sys.executable,'-u',str(Path(__file__).with_name('rapid_autotune.py')),
-                  '--manifest',a.manifest,'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-key-b64',a.vps_key_b64,
-                  '--vps-port',str(a.vps_port),'--profile',a.profile,'--sample-pages','32','--candidates','4,8,12,16',
-                  '--downloaders',str(max(8,a.downloaders)),'--workdir',str(wd),'--out',str(tune_file)]
-            rc=subprocess.run(tune).returncode
-            if rc==0 and tune_file.exists():
-                result=json.loads(tune_file.read_text()); selected=int(result['best_workers'])
-                print(f'RAPID_POOL_AUTOTUNE_SELECTED workers={selected} ppm={result.get("best_pages_per_min")}',flush=True)
-            else:
-                selected=a.workers
-                print(f'RAPID_POOL_AUTOTUNE_FAILED rc={rc}; fallback_workers={selected}',flush=True)
+    if a.autotune and not a.no_autotune:
+        print('RAPID_POOL_AUTOTUNE_START candidates=4,8,12,16 sample=32 source=VPS gallica_requests=0',flush=True)
+        tune=[sys.executable,'-u',str(Path(__file__).with_name('rapid_autotune.py')),
+              '--manifest',a.manifest,'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-key-b64',a.vps_key_b64,
+              '--vps-port',str(a.vps_port),'--profile',a.profile,'--sample-pages','32','--candidates','4,8,12,16',
+              '--downloaders',str(max(8,a.downloaders)),'--workdir',str(wd),'--out',str(tune_file)]
+        rc=subprocess.run(tune).returncode
+        if rc==0 and tune_file.exists():
+            result=json.loads(tune_file.read_text()); selected=int(result['best_workers'])
+            print(f'RAPID_POOL_AUTOTUNE_SELECTED workers={selected} ppm={result.get("best_pages_per_min")}',flush=True)
+        else:
+            print(f'RAPID_POOL_AUTOTUNE_FAILED rc={rc}; fallback_workers={selected}',flush=True)
+    else:
+        print(f'RAPID_POOL_PROFILE A100_TUNED workers={selected} benchmark_reference_ppm=72.948',flush=True)
 
     a.workers=selected; a.downloaders=max(a.downloaders,8)
-    print(f'RAPID_POOL_START rows={len(rows)} workers={a.workers} downloaders={a.downloaders} source=VPS gallica_requests=0',flush=True)
+    generation=f'colab_batch_v6_a100_w{a.workers}'
+    print(f'RAPID_POOL_START rows={len(rows)} workers={a.workers} downloaders={a.downloaders} source=VPS gallica_requests=0 generation={generation}',flush=True)
     tls=threading.local()
     def get_sftp():
         if not hasattr(tls,'sftp'):
@@ -103,7 +96,7 @@ def main():
                 upload_tr=upload_sftp=None
                 if attempt==2: raise
 
-    with ThreadPoolExecutor(max_workers=max(1,a.downloaders)) as dl, ProcessPoolExecutor(max_workers=workers,mp_context=ctx,initializer=init_engine,initargs=(a.profile,)) as gpu:
+    with ThreadPoolExecutor(max_workers=max(1,a.downloaders)) as dl, ProcessPoolExecutor(max_workers=workers,mp_context=ctx,initializer=init_engine,initargs=(a.profile,generation)) as gpu:
         fetch_pending={dl.submit(fetch,r) for r in rows}; gpu_pending=set()
         while fetch_pending or gpu_pending:
             now=time.time()
