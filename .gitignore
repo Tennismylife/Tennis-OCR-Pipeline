@@ -1,0 +1,4 @@
+ocr_benchmark/images/
+ocr_benchmark/out/
+__pycache__/
+*.pyc
