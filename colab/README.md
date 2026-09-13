@@ -5,9 +5,9 @@ This folder contains a manual Google Colab batch worker for Gallica pages.
 ## What it does
 
 - Reads a claimed TSV manifest from the VPS over SFTP.
-- Uses `mode=ALTO` rows for Gallica ALTO download.
-- Uses `mode=RAPID` rows for RapidOCR.
-- Falls back from an ALTO row to RapidOCR if usable ALTO is not returned.
+- Uses `mode=ALTO` rows only for Gallica ALTO download.
+- Uses `mode=RAPID` rows only for RapidOCR.
+- **No cross-fallback inside Colab:** if an ALTO row fails, it stays unresolved and returns to the VPS scheduler for later re-splitting; it is not silently converted to RapidOCR.
 - Uploads `.json`, `.txt`, and `.hits.txt` directly to the selected VPS OCR cache after each completed page.
 - Optionally uploads native ALTO XML to the shared VPS ALTO cache.
 - Re-running the same claim is resumable because remote JSON files are checked before work begins.
