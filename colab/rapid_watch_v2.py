@@ -27,20 +27,31 @@ def main():
             except IOError:
                 print(f'RAPID_WATCH_WAIT claim_missing={a.claim}',flush=True); time.sleep(a.poll); continue
             rows=[r for r in read_manifest(str(local)) if (r.get('mode') or r.get('split') or '').upper()=='RAPID']
-            groups=defaultdict(list); missing=0
+            groups=defaultdict(list)
             for r in rows:
                 cache=(r.get('remote_cache') or '').strip()
                 if not cache: raise RuntimeError('Claim row missing remote_cache')
-                groups[cache].append(r); ark=(r.get('ark') or '').strip(); page=pg(r.get('page')); stem=f'{ark}_f{page}'
-                try: sftp.stat(f"{cache.rstrip('/')}/{stem}.json"); sftp.stat(f"{cache.rstrip('/')}/{stem}.txt")
-                except IOError: missing+=1
-        finally: sftp.close(); tr.close()
-        h=hashlib.sha256(local.read_bytes()).hexdigest(); print(f'RAPID_WATCH_STATUS rows={len(rows)} groups={len(groups)} missing={missing} claim_sha={h[:10]}',flush=True)
+                groups[cache].append(r)
+            h=hashlib.sha256(local.read_bytes()).hexdigest()
+            print(f'RAPID_WATCH_CLAIM rows={len(rows)} groups={len(groups)} claim_sha={h[:10]}',flush=True)
+            incomplete={}; missing=0
+            for cache,grows in groups.items():
+                try: names=set(sftp.listdir(cache.rstrip('/')))
+                except IOError: names=set()
+                todo=[]
+                for r in grows:
+                    ark=(r.get('ark') or '').strip(); page=pg(r.get('page')); stem=f'{ark}_f{page}'
+                    if f'{stem}.json' not in names or f'{stem}.txt' not in names: todo.append(r)
+                incomplete[cache]=todo; missing+=len(todo)
+        finally:
+            sftp.close(); tr.close()
+        print(f'RAPID_WATCH_STATUS rows={len(rows)} groups={len(groups)} missing={missing} claim_sha={h[:10]}',flush=True)
         if rows and missing:
             print('RAPID_WATCH_NEW_OR_INCOMPLETE_CLAIM', 'new=1' if h!=last_hash else 'retry=1',flush=True)
-            for i,(cache,grows) in enumerate(groups.items(),1):
+            for i,(cache,grows) in enumerate(incomplete.items(),1):
+                if not grows: continue
                 sub=wd/f'group_{i}.tsv'; write_subset(sub,grows)
-                print(f'RAPID_WATCH_GROUP {i}/{len(groups)} rows={len(grows)} cache={cache}',flush=True)
+                print(f'RAPID_WATCH_GROUP {i}/{len(incomplete)} rows={len(grows)} cache={cache}',flush=True)
                 cmd=[sys.executable,'-u',str(Path(__file__).with_name('rapid_pool.py')),'--manifest',str(sub),'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-key-b64',a.vps_key_b64,'--vps-port',str(a.vps_port),'--remote-cache',cache,'--profile',(grows[0].get('split_profile') or 'HQ'),'--workers',str(a.workers),'--downloaders',str(a.downloaders),'--no-autotune']
                 rc=subprocess.run(cmd).returncode; print(f'RAPID_WATCH_GROUP_EXIT group={i} rc={rc}',flush=True)
                 if rc!=0: raise RuntimeError(f'rapid group failed rc={rc}')
