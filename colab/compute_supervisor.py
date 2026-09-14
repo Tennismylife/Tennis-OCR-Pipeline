@@ -161,7 +161,7 @@ def main():
                 try: layout_py=ensure_layout_python(a.layout_python,a.repo)
                 except Exception as e:
                     print(f'LAYOUT_BOOTSTRAP_ERROR {type(e).__name__}: {e}',flush=True); time.sleep(a.poll); continue
-                cmd=[layout_py,'-u',str(Path(a.repo)/'colab/layout_watch_filekey.py'),'--vps-key-file',str(key),'--vps-host',a.vps_host,'--vps-user',a.vps-user,'--vps-port',str(a.vps_port),'--claim',layout_claim,'--stop-flag',layout_stop,'--workers',str(a.layout_workers),'--downloaders',str(a.layout_downloaders),'--poll',str(a.poll),'--generation-label',f'colab_gpu_layout_{a.year}_unified']
+                cmd=[layout_py,'-u',str(Path(a.repo)/'colab/layout_watch_filekey.py'),'--vps-key-file',str(key),'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-port',str(a.vps_port),'--claim',layout_claim,'--stop-flag',layout_stop,'--workers',str(a.layout_workers),'--downloaders',str(a.layout_downloaders),'--poll',str(a.poll),'--generation-label',f'colab_gpu_layout_{a.year}_unified']
                 proc=launch_worker(cmd,'LAYOUT')
                 print(f'WORKER_LAUNCHED mode=LAYOUT pid={proc.pid} workers={a.layout_workers} downloaders={a.layout_downloaders}',flush=True)
             time.sleep(a.poll)
