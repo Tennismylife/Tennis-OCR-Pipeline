@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, os, socket, subprocess, sys, time, shutil
+import argparse, os, socket, subprocess, sys, time, shutil, signal
 from pathlib import Path
 
 
@@ -40,12 +40,26 @@ def read_mode_safe(host,user,port,key_file,mode_path,stop_path):
     return mode if mode in {'IDLE','RAPID','LAYOUT','STOP'} else 'IDLE'
 
 
+def cleanup_stale_workers():
+    pats=('rapid_watch_filekey.py','rapid_watch_v2.py','rapid_pool.py','layout_watch_filekey.py','layout_pool_v3.py','layout_watch_filekey.py')
+    killed=0
+    for pat in pats:
+        r=subprocess.run(['pkill','-f',pat],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        if r.returncode==0: killed+=1
+    time.sleep(1)
+    print(f'STALE_WORKERS_CLEANED patterns={killed}',flush=True)
+
+
 def stop_proc(proc):
     if proc is None or proc.poll() is not None: return
-    proc.terminate()
+    try: os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError: return
     try: proc.wait(timeout=20)
     except subprocess.TimeoutExpired:
-        proc.kill(); proc.wait(timeout=10)
+        try: os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        try: proc.wait(timeout=10)
+        except subprocess.TimeoutExpired: pass
 
 
 def ensure_layout_python(layout_python, repo):
@@ -87,6 +101,7 @@ def main():
     rapid_claim=f'{base}/00_MANIFEST/colab_active_claims.tsv'; layout_claim=f'{base}/00_MANIFEST/colab_layout_active_claim.tsv'; layout_stop=f'{base}/00_MANIFEST/colab_layout_quality_complete_{a.year}.flag'
     key=Path(a.vps_key_file)
     if not key.exists() or key.stat().st_size<100: raise SystemExit(f'Invalid key file: {key}')
+    cleanup_stale_workers()
     proc=None; current=None
     print(f'COMPUTE_SUPERVISOR_READY year={a.year} mode_path={mode_path}',flush=True)
     try:
@@ -101,13 +116,13 @@ def main():
                 print(f'MODE_CHANGE {current}->{mode}',flush=True); stop_proc(proc); proc=None; current=mode
             if current=='RAPID' and proc is None:
                 cmd=[a.rapid_python,'-u',str(Path(a.repo)/'colab/rapid_watch_filekey.py'),'--vps-key-file',str(key),'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-port',str(a.vps_port),'--claim',rapid_claim,'--stop-flag',stop_path,'--workers',str(a.rapid_workers),'--downloaders',str(a.rapid_downloaders),'--poll',str(a.poll)]
-                print(f'START_RAPID workers={a.rapid_workers}',flush=True); proc=subprocess.Popen(cmd)
+                print(f'START_RAPID workers={a.rapid_workers}',flush=True); proc=subprocess.Popen(cmd,start_new_session=True)
             elif current=='LAYOUT' and proc is None:
                 try: layout_py=ensure_layout_python(a.layout_python,a.repo)
                 except Exception as e:
                     print(f'LAYOUT_BOOTSTRAP_ERROR {type(e).__name__}: {e}',flush=True); time.sleep(a.poll); continue
                 cmd=[layout_py,'-u',str(Path(a.repo)/'colab/layout_watch_filekey.py'),'--vps-key-file',str(key),'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-port',str(a.vps_port),'--claim',layout_claim,'--stop-flag',layout_stop,'--workers',str(a.layout_workers),'--downloaders',str(a.layout_downloaders),'--poll',str(a.poll),'--generation-label',f'colab_a100_layout_{a.year}_unified']
-                print(f'START_LAYOUT workers={a.layout_workers}',flush=True); proc=subprocess.Popen(cmd)
+                print(f'START_LAYOUT workers={a.layout_workers}',flush=True); proc=subprocess.Popen(cmd,start_new_session=True)
             time.sleep(a.poll)
     finally: stop_proc(proc)
 
