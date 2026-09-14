@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, os, socket, subprocess, sys, time
+import argparse, os, socket, subprocess, sys, time, shutil
 from pathlib import Path
 
 
@@ -33,10 +33,8 @@ def probe_mode(host,user,port,key_file,mode_path,stop_path):
 
 def read_mode_safe(host,user,port,key_file,mode_path,stop_path):
     cmd=[sys.executable,'-u',__file__,'--probe-once','--vps-host',host,'--vps-user',user,'--vps-port',str(port),'--vps-key-file',str(key_file),'--mode-path',mode_path,'--stop-path',stop_path]
-    try:
-        r=subprocess.run(cmd,capture_output=True,text=True,timeout=25)
-    except subprocess.TimeoutExpired:
-        raise TimeoutError('mode probe exceeded 25s')
+    try: r=subprocess.run(cmd,capture_output=True,text=True,timeout=25)
+    except subprocess.TimeoutExpired: raise TimeoutError('mode probe exceeded 25s')
     if r.returncode!=0: raise RuntimeError((r.stderr or r.stdout or f'probe rc={r.returncode}').strip())
     mode=(r.stdout or '').strip().splitlines()[-1].strip().upper()
     return mode if mode in {'IDLE','RAPID','LAYOUT','STOP'} else 'IDLE'
@@ -48,6 +46,31 @@ def stop_proc(proc):
     try: proc.wait(timeout=20)
     except subprocess.TimeoutExpired:
         proc.kill(); proc.wait(timeout=10)
+
+
+def ensure_layout_python(layout_python, repo):
+    py=Path(layout_python); env=py.parent.parent
+    probe=[str(py),'-c',"import paddle,paddlex,cv2,paramiko,sys; sys.exit(0 if paddle.__version__=='3.2.0' and paddle.device.is_compiled_with_cuda() else 1)"]
+    if py.exists() and subprocess.run(probe).returncode==0:
+        print(f'LAYOUT_ENV_READY cached=1 python={py}',flush=True); return str(py)
+    uv=shutil.which('uv')
+    if not uv: raise RuntimeError('uv not found in supervisor environment')
+    print('LAYOUT_BOOTSTRAP 1/4 Python 3.12',flush=True)
+    subprocess.run([uv,'python','install','3.12'],check=True,timeout=300)
+    if not py.exists(): subprocess.run([uv,'venv','--seed','--python','3.12',str(env)],check=True,timeout=300)
+    paddle_url='https://paddle-whl.cdn.bcebos.com/stable/cu126/paddlepaddle-gpu/paddlepaddle_gpu-3.2.0-cp312-cp312-linux_x86_64.whl'
+    wheel=Path('/content/paddlepaddle_gpu-3.2.0-cp312-cp312-linux_x86_64.whl'); expected=1890365820
+    need=subprocess.run([str(py),'-c',"import paddle,sys; sys.exit(0 if paddle.__version__=='3.2.0' and paddle.device.is_compiled_with_cuda() else 1)"]).returncode!=0
+    if need:
+        print('LAYOUT_BOOTSTRAP 2/4 Paddle GPU wheel',flush=True)
+        if not wheel.exists() or wheel.stat().st_size!=expected:
+            subprocess.run(['curl','-L','--fail','--retry','5','-C','-','--progress-bar','-o',str(wheel),paddle_url],check=True)
+        print('LAYOUT_BOOTSTRAP 3/4 install Paddle GPU',flush=True)
+        subprocess.run([str(py),'-m','pip','install','--progress-bar','on',str(wheel)],check=True)
+    print('LAYOUT_BOOTSTRAP 4/4 layout stack',flush=True)
+    subprocess.run([str(py),'-m','pip','install','--progress-bar','on','paddlex==3.7.2','paddleocr==3.7.0','opencv-contrib-python==4.10.0.84','paramiko>=3.5,<4'],check=True)
+    subprocess.run([str(py),'-c',"import paddle,paddlex,cv2; print('LAYOUT_ENV_READY',paddle.__version__,paddlex.__version__,cv2.__version__,'CUDA',paddle.device.is_compiled_with_cuda()); assert paddle.device.is_compiled_with_cuda()"],check=True)
+    return str(py)
 
 
 def main():
@@ -80,7 +103,10 @@ def main():
                 cmd=[a.rapid_python,'-u',str(Path(a.repo)/'colab/rapid_watch_filekey.py'),'--vps-key-file',str(key),'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-port',str(a.vps_port),'--claim',rapid_claim,'--stop-flag',stop_path,'--workers',str(a.rapid_workers),'--downloaders',str(a.rapid_downloaders),'--poll',str(a.poll)]
                 print(f'START_RAPID workers={a.rapid_workers}',flush=True); proc=subprocess.Popen(cmd)
             elif current=='LAYOUT' and proc is None:
-                cmd=[a.layout_python,'-u',str(Path(a.repo)/'colab/layout_watch_filekey.py'),'--vps-key-file',str(key),'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-port',str(a.vps_port),'--claim',layout_claim,'--stop-flag',layout_stop,'--workers',str(a.layout_workers),'--downloaders',str(a.layout_downloaders),'--poll',str(a.poll),'--generation-label',f'colab_a100_layout_{a.year}_unified']
+                try: layout_py=ensure_layout_python(a.layout_python,a.repo)
+                except Exception as e:
+                    print(f'LAYOUT_BOOTSTRAP_ERROR {type(e).__name__}: {e}',flush=True); time.sleep(a.poll); continue
+                cmd=[layout_py,'-u',str(Path(a.repo)/'colab/layout_watch_filekey.py'),'--vps-key-file',str(key),'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-port',str(a.vps_port),'--claim',layout_claim,'--stop-flag',layout_stop,'--workers',str(a.layout_workers),'--downloaders',str(a.layout_downloaders),'--poll',str(a.poll),'--generation-label',f'colab_a100_layout_{a.year}_unified']
                 print(f'START_LAYOUT workers={a.layout_workers}',flush=True); proc=subprocess.Popen(cmd)
             time.sleep(a.poll)
     finally: stop_proc(proc)
