@@ -41,7 +41,7 @@ def read_mode_safe(host,user,port,key_file,mode_path,stop_path):
 
 
 def cleanup_stale_workers():
-    pats=('rapid_watch_filekey.py','rapid_watch_v2.py','rapid_pool.py','layout_watch_filekey.py','layout_pool_v3.py','layout_watch_filekey.py')
+    pats=('rapid_watch_filekey.py','rapid_watch_v2.py','rapid_pool.py','layout_watch_filekey.py','layout_pool_v3.py')
     killed=0
     for pat in pats:
         r=subprocess.run(['pkill','-f',pat],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -52,10 +52,12 @@ def cleanup_stale_workers():
 
 def stop_proc(proc):
     if proc is None or proc.poll() is not None: return
+    print(f'WORKER_STOP_REQUEST pid={proc.pid}',flush=True)
     try: os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError: return
     try: proc.wait(timeout=20)
     except subprocess.TimeoutExpired:
+        print(f'WORKER_STOP_FORCE pid={proc.pid}',flush=True)
         try: os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError: pass
         try: proc.wait(timeout=10)
@@ -102,27 +104,35 @@ def main():
     key=Path(a.vps_key_file)
     if not key.exists() or key.stat().st_size<100: raise SystemExit(f'Invalid key file: {key}')
     cleanup_stale_workers()
-    proc=None; current=None
-    print(f'COMPUTE_SUPERVISOR_READY year={a.year} mode_path={mode_path}',flush=True)
+    proc=None; current=None; tick=0; started=time.time()
+    print(f'COMPUTE_SUPERVISOR_READY year={a.year} poll={a.poll}s mode_path={mode_path}',flush=True)
     try:
         while True:
+            tick+=1
             try: mode=read_mode_safe(a.vps_host,a.vps_user,a.vps_port,key,mode_path,stop_path)
             except Exception as e:
-                print(f'MODE_POLL_ERROR {type(e).__name__}: {e}',flush=True); time.sleep(a.poll); continue
-            if mode=='STOP': print('COMPUTE_SUPERVISOR_STOP',flush=True); stop_proc(proc); return 0
+                print(f'SUPERVISOR_POLL_ERROR tick={tick} {type(e).__name__}: {e}',flush=True); time.sleep(a.poll); continue
             if proc is not None and proc.poll() is not None:
-                print(f'WORKER_EXIT mode={current} rc={proc.returncode}',flush=True); proc=None
+                print(f'WORKER_EXIT mode={current} pid={proc.pid} rc={proc.returncode}',flush=True); proc=None
+            worker_state='none' if proc is None else f'running pid={proc.pid}'
+            print(f'SUPERVISOR_POLL tick={tick} uptime={time.time()-started:.0f}s mode={mode} worker={worker_state}',flush=True)
+            if mode=='STOP':
+                print('COMPUTE_SUPERVISOR_STOP',flush=True); stop_proc(proc); return 0
             if mode!=current:
                 print(f'MODE_CHANGE {current}->{mode}',flush=True); stop_proc(proc); proc=None; current=mode
-            if current=='RAPID' and proc is None:
+            if current=='IDLE':
+                print(f'NO_WORK tick={tick} next_poll={a.poll}s',flush=True)
+            elif current=='RAPID' and proc is None:
                 cmd=[a.rapid_python,'-u',str(Path(a.repo)/'colab/rapid_watch_filekey.py'),'--vps-key-file',str(key),'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-port',str(a.vps_port),'--claim',rapid_claim,'--stop-flag',stop_path,'--workers',str(a.rapid_workers),'--downloaders',str(a.rapid_downloaders),'--poll',str(a.poll)]
-                print(f'START_RAPID workers={a.rapid_workers}',flush=True); proc=subprocess.Popen(cmd,start_new_session=True)
+                proc=subprocess.Popen(cmd,start_new_session=True)
+                print(f'WORKER_LAUNCHED mode=RAPID pid={proc.pid} workers={a.rapid_workers} downloaders={a.rapid_downloaders}',flush=True)
             elif current=='LAYOUT' and proc is None:
                 try: layout_py=ensure_layout_python(a.layout_python,a.repo)
                 except Exception as e:
                     print(f'LAYOUT_BOOTSTRAP_ERROR {type(e).__name__}: {e}',flush=True); time.sleep(a.poll); continue
-                cmd=[layout_py,'-u',str(Path(a.repo)/'colab/layout_watch_filekey.py'),'--vps-key-file',str(key),'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-port',str(a.vps_port),'--claim',layout_claim,'--stop-flag',layout_stop,'--workers',str(a.layout_workers),'--downloaders',str(a.layout_downloaders),'--poll',str(a.poll),'--generation-label',f'colab_a100_layout_{a.year}_unified']
-                print(f'START_LAYOUT workers={a.layout_workers}',flush=True); proc=subprocess.Popen(cmd,start_new_session=True)
+                cmd=[layout_py,'-u',str(Path(a.repo)/'colab/layout_watch_filekey.py'),'--vps-key-file',str(key),'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-port',str(a.vps_port),'--claim',layout_claim,'--stop-flag',layout_stop,'--workers',str(a.layout_workers),'--downloaders',str(a.layout_downloaders),'--poll',str(a.poll),'--generation-label',f'colab_gpu_layout_{a.year}_unified']
+                proc=subprocess.Popen(cmd,start_new_session=True)
+                print(f'WORKER_LAUNCHED mode=LAYOUT pid={proc.pid} workers={a.layout_workers} downloaders={a.layout_downloaders}',flush=True)
             time.sleep(a.poll)
     finally: stop_proc(proc)
 
