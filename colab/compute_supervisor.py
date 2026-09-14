@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-import argparse, os, subprocess, sys, time
+import argparse, os, socket, subprocess, sys, time
 from pathlib import Path
-import paramiko
 
 
 def connect(host, user, port, key_file):
+    # Import Paramiko lazily so the supervisor can announce READY immediately.
+    import paramiko
     key = paramiko.Ed25519Key.from_private_key_file(str(key_file))
-    tr = paramiko.Transport((host, port))
+    sock = socket.create_connection((host, port), timeout=15)
+    tr = paramiko.Transport(sock)
+    tr.banner_timeout = 15
+    tr.auth_timeout = 15
     tr.connect(username=user, pkey=key)
     return tr, paramiko.SFTPClient.from_transport(tr)
 
@@ -73,7 +77,9 @@ def main():
             try:
                 mode = read_mode(a.vps_host,a.vps_user,a.vps_port,key,mode_path,stop_path)
             except Exception as e:
-                print(f'MODE_POLL_ERROR {type(e).__name__}: {e}', flush=True); time.sleep(a.poll); continue
+                print(f'MODE_POLL_ERROR {type(e).__name__}: {e}', flush=True)
+                time.sleep(a.poll)
+                continue
             if mode == 'STOP':
                 print('COMPUTE_SUPERVISOR_STOP', flush=True); stop_proc(proc); return 0
             if proc is not None and proc.poll() is not None:
