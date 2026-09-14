@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, os, socket, subprocess, sys, time, shutil, signal
+import argparse, os, socket, subprocess, sys, time, shutil, signal, threading
 from pathlib import Path
 
 
@@ -48,6 +48,37 @@ def cleanup_stale_workers():
         if r.returncode==0: killed+=1
     time.sleep(1)
     print(f'STALE_WORKERS_CLEANED patterns={killed}',flush=True)
+
+
+def relay_output(proc, mode):
+    try:
+        if proc.stdout is None: return
+        for raw in iter(proc.stdout.readline, ''):
+            line=raw.rstrip('\r\n')
+            if line:
+                print(f'[{mode}] {line}', flush=True)
+    except Exception as e:
+        print(f'WORKER_LOG_RELAY_ERROR mode={mode} pid={proc.pid} {type(e).__name__}: {e}', flush=True)
+    finally:
+        try:
+            if proc.stdout is not None: proc.stdout.close()
+        except Exception:
+            pass
+
+
+def launch_worker(cmd, mode):
+    proc=subprocess.Popen(
+        cmd,
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    t=threading.Thread(target=relay_output,args=(proc,mode),daemon=True,name=f'{mode.lower()}-log-relay-{proc.pid}')
+    t.start()
+    print(f'WORKER_LOG_RELAY_STARTED mode={mode} pid={proc.pid}',flush=True)
+    return proc
 
 
 def stop_proc(proc):
@@ -124,14 +155,14 @@ def main():
                 print(f'NO_WORK tick={tick} next_poll={a.poll}s',flush=True)
             elif current=='RAPID' and proc is None:
                 cmd=[a.rapid_python,'-u',str(Path(a.repo)/'colab/rapid_watch_filekey.py'),'--vps-key-file',str(key),'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-port',str(a.vps_port),'--claim',rapid_claim,'--stop-flag',stop_path,'--workers',str(a.rapid_workers),'--downloaders',str(a.rapid_downloaders),'--poll',str(a.poll)]
-                proc=subprocess.Popen(cmd,start_new_session=True)
+                proc=launch_worker(cmd,'RAPID')
                 print(f'WORKER_LAUNCHED mode=RAPID pid={proc.pid} workers={a.rapid_workers} downloaders={a.rapid_downloaders}',flush=True)
             elif current=='LAYOUT' and proc is None:
                 try: layout_py=ensure_layout_python(a.layout_python,a.repo)
                 except Exception as e:
                     print(f'LAYOUT_BOOTSTRAP_ERROR {type(e).__name__}: {e}',flush=True); time.sleep(a.poll); continue
-                cmd=[layout_py,'-u',str(Path(a.repo)/'colab/layout_watch_filekey.py'),'--vps-key-file',str(key),'--vps-host',a.vps_host,'--vps-user',a.vps_user,'--vps-port',str(a.vps_port),'--claim',layout_claim,'--stop-flag',layout_stop,'--workers',str(a.layout_workers),'--downloaders',str(a.layout_downloaders),'--poll',str(a.poll),'--generation-label',f'colab_gpu_layout_{a.year}_unified']
-                proc=subprocess.Popen(cmd,start_new_session=True)
+                cmd=[layout_py,'-u',str(Path(a.repo)/'colab/layout_watch_filekey.py'),'--vps-key-file',str(key),'--vps-host',a.vps_host,'--vps-user',a.vps-user,'--vps-port',str(a.vps_port),'--claim',layout_claim,'--stop-flag',layout_stop,'--workers',str(a.layout_workers),'--downloaders',str(a.layout_downloaders),'--poll',str(a.poll),'--generation-label',f'colab_gpu_layout_{a.year}_unified']
+                proc=launch_worker(cmd,'LAYOUT')
                 print(f'WORKER_LAUNCHED mode=LAYOUT pid={proc.pid} workers={a.layout_workers} downloaders={a.layout_downloaders}',flush=True)
             time.sleep(a.poll)
     finally: stop_proc(proc)
