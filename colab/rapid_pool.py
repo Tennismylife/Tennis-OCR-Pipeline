@@ -35,7 +35,7 @@ def main():
     ap.add_argument('--workdir',default='/content/tml_rapid_pool'); ap.add_argument('--autotune',action='store_true'); ap.add_argument('--no-autotune',action='store_true')
     a=ap.parse_args(); rows=[r for r in read_manifest(a.manifest) if (r.get('mode') or r.get('split') or '').upper()=='RAPID']
     wd=Path(a.workdir); imgdir=wd/'images'; outdir=wd/'out'; imgdir.mkdir(parents=True,exist_ok=True); outdir.mkdir(parents=True,exist_ok=True)
-    if not rows: print('RAPID_POOL_START rows=0',flush=True); return
+    if not rows: print('RAPID_POOL_START rows=0',flush=True); return 0
     selected=a.workers; tune_file=wd/'autotune_result.json'
     if a.autotune and not a.no_autotune:
         print('RAPID_POOL_AUTOTUNE_START candidates=4,8,12,16 sample=32 source=VPS gallica_requests=0',flush=True)
@@ -102,4 +102,5 @@ def main():
         if upload_tr: upload_tr.close()
     except Exception: pass
     elapsed=max(.001,time.time()-t0); u,m,p=gpu_snapshot(); print(f'RAPID_FINAL done={done} cached={cached} errors={err} elapsed={elapsed:.1f}s ppm={done*60/elapsed:.2f} gpu={u:.0f}% vram={m:.0f}MiB power={p:.0f}W',flush=True)
-if __name__=='__main__': main()
+    return 2 if err else 0
+if __name__=='__main__': raise SystemExit(main())
