@@ -52,7 +52,9 @@ def main():
         else: print(f'RAPID_POOL_AUTOTUNE_FAILED rc={rc}; fallback_workers={selected}',flush=True)
     else:
         print(f'RAPID_POOL_PROFILE workers={selected} profile={a.profile} device={a.device.upper()}',flush=True)
-    a.workers=max(1,selected); a.downloaders=max(1,a.downloaders); generation=f'colab_batch_{a.device}_w{a.workers}'
+    a.workers=max(1,selected); a.downloaders=max(1,a.downloaders)
+    generation_prefix=os.environ.get('TML_RAPID_GENERATION_PREFIX','colab_batch').strip() or 'colab_batch'
+    generation=f'{generation_prefix}_{a.device}_w{a.workers}'
     print(f'RAPID_POOL_START rows={total} workers={a.workers} downloaders={a.downloaders} source=VPS gallica_requests=0 generation={generation} device={a.device.upper()}',flush=True)
     tls=threading.local()
     def get_sftp():
