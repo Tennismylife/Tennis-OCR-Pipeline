@@ -18,7 +18,11 @@ def main():
     ap.add_argument('--claim',required=True); ap.add_argument('--stop-flag'); ap.add_argument('--workers',type=int,default=12); ap.add_argument('--downloaders',type=int,default=8); ap.add_argument('--device',choices=['cuda','cpu'],default='cuda'); ap.add_argument('--poll',type=int,default=10); ap.add_argument('--workdir',default='/content/tml_rapid_watch_v2')
     a=ap.parse_args(); wd=Path(a.workdir); wd.mkdir(parents=True,exist_ok=True); local=wd/'claim.tsv'; last_hash=None; tick=0; started=time.time()
     force_profile=os.environ.get('TML_RAPID_FORCE_PROFILE','').strip().upper()
-    if force_profile not in {'','HQ','STANDARD'}: raise RuntimeError(f'Invalid TML_RAPID_FORCE_PROFILE={force_profile!r}')
+    if force_profile not in {'','HQ','STANDARD','CPU_FAST'}: raise RuntimeError(f'Invalid TML_RAPID_FORCE_PROFILE={force_profile!r}')
+    # STANDARD was designed for stronger hosts. On a free Colab CPU, cap the detection
+    # canvas by its long side instead of enlarging the short side of a newspaper page.
+    if a.device=='cpu' and force_profile in {'','STANDARD'}:
+        force_profile='CPU_FAST'
     print(f'RAPID_WATCH_READY poll={a.poll}s workers={a.workers} downloaders={a.downloaders} device={a.device.upper()} force_profile={force_profile or "CLAIM"} claim={a.claim}',flush=True)
     while True:
         tick+=1; poll_t0=time.time()
