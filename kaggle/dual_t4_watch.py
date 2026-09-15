@@ -38,19 +38,19 @@ def main():
     ap.add_argument('--claim',required=True); ap.add_argument('--stop-flag')
     ap.add_argument('--workers-per-gpu',type=int,default=3); ap.add_argument('--downloaders-per-gpu',type=int,default=4)
     ap.add_argument('--poll',type=int,default=10); ap.add_argument('--workdir',default='/kaggle/working/tml_kaggle_t4x2')
-    ap.add_argument('--max-gpus',type=int,default=2)
+    ap.add_argument('--max-gpus',type=int,default=2); ap.add_argument('--once',action='store_true')
     a=ap.parse_args()
 
     ngpu=min(max(0,gpu_count()),max(1,a.max_gpus))
     if ngpu<1: raise SystemExit('No NVIDIA GPU visible. Enable Kaggle GPU accelerator first.')
     wd=Path(a.workdir); wd.mkdir(parents=True,exist_ok=True); local=wd/'claim.tsv'
-    print(f'KAGGLE_T4_WATCH_READY gpus={ngpu} workers_per_gpu={a.workers_per_gpu} downloaders_per_gpu={a.downloaders_per_gpu} claim={a.claim}',flush=True)
+    print(f'KAGGLE_T4_WATCH_READY gpus={ngpu} workers_per_gpu={a.workers_per_gpu} downloaders_per_gpu={a.downloaders_per_gpu} once={int(a.once)} claim={a.claim}',flush=True)
     try: subprocess.run(['nvidia-smi','-L'],check=False)
     except Exception: pass
 
     tick=0; started=time.time(); last_hash=None
     while True:
-        tick+=1; t0=time.time()
+        tick+=1; poll_t0=time.time()
         tr,sftp=connect_sftp(a.vps_host,a.vps_user,a.vps_key_b64,a.vps_port)
         try:
             if a.stop_flag:
@@ -59,9 +59,11 @@ def main():
             try: sftp.get(a.claim,str(local))
             except IOError:
                 print(f'KAGGLE_T4_IDLE tick={tick} claim_missing=1 uptime={time.time()-started:.0f}s',flush=True)
+                if a.once: return 3
                 time.sleep(a.poll); continue
             rows=[r for r in read_manifest(str(local)) if (r.get('mode') or r.get('split') or '').upper()=='RAPID']
             h=hashlib.sha256(local.read_bytes()).hexdigest()
+            claim_state='new' if h!=last_hash else 'retry'
             groups=defaultdict(list)
             for r in rows:
                 cache=(r.get('remote_cache') or '').strip()
@@ -79,11 +81,15 @@ def main():
         finally:
             sftp.close(); tr.close()
 
-        print(f'KAGGLE_T4_POLL tick={tick} rows={len(rows)} missing={missing} complete={len(rows)-missing}/{len(rows)} claim_sha={h[:10]} poll_sec={time.time()-t0:.2f}',flush=True)
+        print(f'KAGGLE_T4_POLL tick={tick} rows={len(rows)} missing={missing} complete={len(rows)-missing}/{len(rows)} claim_sha={h[:10]} poll_sec={time.time()-poll_t0:.2f}',flush=True)
         if not rows or not missing:
             last_hash=h
+            if a.once:
+                print(f'KAGGLE_T4_ONCE_DONE rows={len(rows)} already_complete={len(rows)-missing}',flush=True)
+                return 0
             time.sleep(a.poll); continue
 
+        cycle_t0=time.time(); cycle_rows=missing
         for gi,(cache,grows) in enumerate((x for x in incomplete.items() if x[1]),1):
             shards=[[] for _ in range(ngpu)]
             for r in grows: shards[stable_bucket(r,ngpu)].append(r)
@@ -106,8 +112,10 @@ def main():
                 rc=p.wait(); print(f'KAGGLE_T4_GROUP_EXIT group={gi} gpu={gpu} rows={n} rc={rc}',flush=True)
                 if rc: bad.append((gpu,rc))
             if bad: raise RuntimeError(f'Kaggle GPU shard failure: {bad}')
+        elapsed=max(.001,time.time()-cycle_t0); ppm=cycle_rows*60/elapsed
+        print(f'KAGGLE_T4_CYCLE_COMPLETE tick={tick} claim_state={claim_state} rows={cycle_rows} elapsed={elapsed:.2f}s ppm={ppm:.3f}',flush=True)
         last_hash=h
-        print(f'KAGGLE_T4_CYCLE_COMPLETE tick={tick} claim_state={"new" if h!=last_hash else "retry"}',flush=True)
+        if a.once: return 0
         time.sleep(a.poll)
 
 if __name__=='__main__': raise SystemExit(main())
