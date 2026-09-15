@@ -91,8 +91,15 @@ def build_engine(profile,device):
       'EngineConfig.onnxruntime.cuda_ep_cfg.do_copy_in_default_stream':True,
       'Rec.lang_type':LangRec.LATIN,'Rec.model_type':ModelType.MOBILE,'Rec.ocr_version':OCRVersion.PPOCRV5,
       'Det.model_type':ModelType.SMALL,'Det.ocr_version':OCRVersion.PPOCRV6}
-    if profile=='HQ': params.update({'Det.limit_side_len':2048,'Det.limit_type':'min','Det.box_thresh':0.30,'Det.max_candidates':4000})
-    else: params.update({'Det.limit_side_len':1536,'Det.limit_type':'min','Det.box_thresh':0.35,'Det.max_candidates':3000})
+    if profile=='HQ':
+        params.update({'Det.limit_side_len':2048,'Det.limit_type':'min','Det.box_thresh':0.30,'Det.max_candidates':4000})
+    elif profile=='CPU_FAST':
+        # Free Colab CPUs are dramatically slower when a newspaper page is enlarged so
+        # its short side reaches 1536. Cap the long side instead. Recognition still runs
+        # on the detected source crops, while detection work and false-positive boxes drop.
+        params.update({'Det.limit_side_len':1800,'Det.limit_type':'max','Det.box_thresh':0.38,'Det.max_candidates':2200})
+    else:
+        params.update({'Det.limit_side_len':1536,'Det.limit_type':'min','Det.box_thresh':0.35,'Det.max_candidates':3000})
     engine=RapidOCR(params=params)
     print(f'RapidOCR engine ready profile={profile} device={"CUDA" if use_cuda else "CPU"}',flush=True)
     return engine
@@ -143,7 +150,7 @@ def suffix(fp):
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--manifest',required=True);ap.add_argument('--workdir',default='/content/tml_colab')
     ap.add_argument('--vps-host',required=True);ap.add_argument('--vps-user',required=True);ap.add_argument('--vps-key-b64',required=True);ap.add_argument('--vps-port',type=int,default=22)
-    ap.add_argument('--remote-cache',required=True);ap.add_argument('--remote-alto-cache',default='');ap.add_argument('--profile',default='HQ',choices=['HQ','STANDARD'])
+    ap.add_argument('--remote-cache',required=True);ap.add_argument('--remote-alto-cache',default='');ap.add_argument('--profile',default='HQ',choices=['HQ','STANDARD','CPU_FAST'])
     ap.add_argument('--device',default='auto',choices=['auto','cuda','cpu']);ap.add_argument('--delay',type=float,default=15.0);ap.add_argument('--max-pages',type=int,default=0)
     a=ap.parse_args();wd=Path(a.workdir);wd.mkdir(parents=True,exist_ok=True);rows=read_manifest(a.manifest)
     if a.max_pages:rows=rows[:a.max_pages]
