@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-import hashlib, json, time
+import hashlib, json, time, urllib.request
 from pathlib import PurePosixPath
+
+_PUBLIC_IP = None
+_PUBLIC_IP_TS = 0.0
 
 
 def _mkdir_p(sftp, path):
@@ -22,12 +25,29 @@ def _safe_key(key):
     return hashlib.sha1(raw).hexdigest()[:20]
 
 
+def _public_egress_ip():
+    global _PUBLIC_IP,_PUBLIC_IP_TS
+    now=time.time()
+    if _PUBLIC_IP and now-_PUBLIC_IP_TS < 300:
+        return _PUBLIC_IP
+    for url in ('https://api.ipify.org','https://checkip.amazonaws.com'):
+        try:
+            req=urllib.request.Request(url,headers={'User-Agent':'TML-Colab-IP-Probe/1.0'})
+            with urllib.request.urlopen(req,timeout=5) as r:
+                ip=r.read().decode('ascii','replace').strip()
+            if ip and len(ip) < 80:
+                _PUBLIC_IP=ip; _PUBLIC_IP_TS=now; return ip
+        except Exception:
+            pass
+    return _PUBLIC_IP or ''
+
+
 def heartbeat(sftp, base, worker_id, capabilities=''):
     root=f'{base}/00_MANIFEST/colab_workers'
     _mkdir_p(sftp,root)
     path=f'{root}/{worker_id}.json'
     tmp=path+f'.tmp.{int(time.time()*1000)}'
-    payload=json.dumps({'worker_id':worker_id,'ts':time.time(),'capabilities':capabilities},separators=(',',':')).encode()
+    payload=json.dumps({'worker_id':worker_id,'ts':time.time(),'capabilities':capabilities,'public_egress_ip':_public_egress_ip()},separators=(',',':')).encode()
     with sftp.open(tmp,'wb') as f:f.write(payload)
     try:sftp.posix_rename(tmp,path)
     except Exception:
