@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-import argparse, csv, io, os, random, socket, time, urllib.error, urllib.parse, urllib.request
+import argparse, csv, io, os, random, socket, time, urllib.error, urllib.parse, urllib.request, uuid
 import xml.etree.ElementTree as ET
 from pathlib import PurePosixPath
+from claim_lease import ClaimLease, heartbeat
 
 
 def connect(host, user, port, key_file):
@@ -37,7 +38,7 @@ def read_text(sftp, path):
 
 def atomic_put_bytes(sftp, remote_path, data):
     parent=str(PurePosixPath(remote_path).parent); mkdir_p(sftp,parent)
-    tmp=remote_path+f'.tmp.{os.getpid()}'
+    tmp=remote_path+f'.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}'
     with sftp.open(tmp,'wb') as f: f.write(data)
     try: sftp.posix_rename(tmp,remote_path)
     except Exception:
@@ -87,51 +88,62 @@ def read_claims(sftp, path):
 
 
 def main():
-    ap=argparse.ArgumentParser(description='Always-on Gallica ALTO lane for Colab; works with or without GPU')
+    ap=argparse.ArgumentParser(description='Always-on Gallica ALTO lane for Colab; multi-runtime safe and GPU-independent')
     ap.add_argument('--year',type=int,required=True)
     ap.add_argument('--vps-host',required=True); ap.add_argument('--vps-user',required=True); ap.add_argument('--vps-port',type=int,default=2222)
-    ap.add_argument('--vps-key-file',required=True)
+    ap.add_argument('--vps-key-file',required=True); ap.add_argument('--worker-id',default='')
     ap.add_argument('--delay',type=float,default=12.0); ap.add_argument('--jitter-min',type=float,default=0.0); ap.add_argument('--jitter-max',type=float,default=.25)
-    ap.add_argument('--poll',type=int,default=10)
-    a=ap.parse_args()
+    ap.add_argument('--poll',type=int,default=10); ap.add_argument('--lease-ttl',type=int,default=180)
+    a=ap.parse_args(); worker_id=(a.worker_id or f'colab-{uuid.uuid4().hex[:10]}').strip()
     base=f'/home/andre/GallicaJobs/gallica-{a.year}-all-tennis/GALlica_{a.year}_ALL_TENNIS'
     claim=f'{base}/00_MANIFEST/colab_alto_active_claims.tsv'
     final_flag=f'{base}/00_MANIFEST/pre_ai_complete_{a.year}.flag'
     cache='/home/andre/GallicaJobs/_shared/alto_cache'
-    last=0.0; done=set(); tick=0
-    print(f'COLAB_ALTO_READY year={a.year} lane=independent delay={a.delay}s jitter={a.jitter_min}-{a.jitter_max} gpu_required=NO',flush=True)
+    last=0.0; done=set(); tick=0; skipped_locked=0
+    print(f'COLAB_ALTO_READY year={a.year} worker_id={worker_id} lane=independent delay={a.delay}s jitter={a.jitter_min}-{a.jitter_max} gpu_required=NO multicolab=YES',flush=True)
     while True:
         tick+=1
         try: tr,sftp=connect(a.vps_host,a.vps_user,a.vps_port,a.vps_key_file)
         except Exception as e:
             print(f'COLAB_ALTO_CONNECT_ERROR tick={tick} {type(e).__name__}: {e}',flush=True); time.sleep(a.poll); continue
         try:
+            heartbeat(sftp,base,worker_id,'ALTO')
             if exists(sftp,final_flag):
                 print('COLAB_ALTO_FINAL_FLAG_SEEN',flush=True); return 0
             claims=read_claims(sftp,claim)
             if not claims:
-                if tick%6==1: print(f'COLAB_ALTO_IDLE tick={tick}',flush=True)
+                if tick%6==1: print(f'COLAB_ALTO_IDLE tick={tick} worker_id={worker_id}',flush=True)
                 time.sleep(a.poll); continue
             progressed=0
             for ark,page in claims:
                 xmlp=f'{cache}/{ark}/f{int(page):03d}.xml'; txtp=f'{cache}/{ark}/f{int(page):03d}.txt'
                 if exists(sftp,xmlp) and exists(sftp,txtp):
                     done.add((ark,page)); continue
-                wait=max(0.0,last+a.delay+random.uniform(a.jitter_min,a.jitter_max)-time.time()) if last else 0.0
-                if wait: time.sleep(wait)
-                code,payload,ra=fetch_alto(ark,page); last=time.time()
-                if code==200 and payload:
-                    try: text=parse_alto(payload)
-                    except Exception as e:
-                        print(f'COLAB_ALTO_PARSE_FAIL {ark} f{page} {type(e).__name__}',flush=True); continue
-                    atomic_put_bytes(sftp,xmlp,payload)
-                    atomic_put_bytes(sftp,txtp,(text+'\n').encode('utf-8'))
-                    done.add((ark,page)); progressed+=1
-                    print(f'COLAB_ALTO_OK ark={ark} page={page} chars={len(text)} total_session={len(done)}',flush=True)
-                elif code==429:
-                    cool=max(60.0,min(ra or 0,600.0)); print(f'COLAB_ALTO_429 ark={ark} page={page} cooldown={cool:.0f}s',flush=True); time.sleep(cool); break
-                else:
-                    print(f'COLAB_ALTO_FAIL ark={ark} page={page} http={code}',flush=True)
+                lease=ClaimLease(sftp,base,worker_id,'alto',f'{ark}_f{page}',ttl=a.lease_ttl)
+                if not lease.acquire():
+                    skipped_locked+=1; continue
+                try:
+                    if exists(sftp,xmlp) and exists(sftp,txtp):
+                        done.add((ark,page)); continue
+                    wait=max(0.0,last+a.delay+random.uniform(a.jitter_min,a.jitter_max)-time.time()) if last else 0.0
+                    if wait: time.sleep(wait)
+                    code,payload,ra=fetch_alto(ark,page); last=time.time()
+                    if code==200 and payload:
+                        try: text=parse_alto(payload)
+                        except Exception as e:
+                            print(f'COLAB_ALTO_PARSE_FAIL worker_id={worker_id} {ark} f{page} {type(e).__name__}',flush=True); continue
+                        atomic_put_bytes(sftp,xmlp,payload)
+                        atomic_put_bytes(sftp,txtp,(text+'\n').encode('utf-8'))
+                        done.add((ark,page)); progressed+=1
+                        print(f'COLAB_ALTO_OK worker_id={worker_id} ark={ark} page={page} chars={len(text)} total_session={len(done)}',flush=True)
+                    elif code==429:
+                        cool=max(60.0,min(ra or 0,600.0)); print(f'COLAB_ALTO_429 worker_id={worker_id} ark={ark} page={page} cooldown={cool:.0f}s',flush=True); time.sleep(cool); break
+                    else:
+                        print(f'COLAB_ALTO_FAIL worker_id={worker_id} ark={ark} page={page} http={code}',flush=True)
+                finally:
+                    lease.release()
+            if tick%6==0:
+                print(f'COLAB_ALTO_STATUS worker_id={worker_id} tick={tick} claims={len(claims)} progressed={progressed} locked_skips={skipped_locked} session_done={len(done)}',flush=True)
             if progressed==0: time.sleep(a.poll)
         finally:
             try:sftp.close();tr.close()
